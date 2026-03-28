@@ -1,17 +1,18 @@
 # ChessCoach
 
-A dependency-free Python tool that downloads a player's recent Chess.com games, reviews each game, and provides quick insights.
+A Python tool that downloads a player's recent Chess.com games, runs engine-backed move analysis, and provides quick coaching insights.
 
 ## Features
 
 - Pulls all games from the last two months by default (`--days 61`)
 - Detects opening name from Chess.com metadata
-- Highlights heuristic "good" and "bad" moves for the selected player
+- Highlights engine-evaluated "good" and "bad" moves for the selected player
 - Rates performance by game stage:
   - opening
   - midgame
   - endgame
 - Includes a simple browser UI for username input and report viewing
+- Shows games newest-to-oldest in the UI
 
 ## CLI usage
 
@@ -26,6 +27,8 @@ python3 chesscom_recent_games.py <chesscom_username> --output recent_games_analy
 - `--ui`: run a local web UI instead of one-shot CLI output
 - `--host`: UI host (default `127.0.0.1`)
 - `--port`: UI port (default `8000`)
+- `--engine-path`: path to UCI engine binary (default `stockfish`)
+- `--engine-depth`: engine depth for per-move analysis (default `12`)
 
 ## UI usage
 
@@ -49,7 +52,16 @@ The generated JSON includes:
 
 ## Important note
 
-Move quality and stage scoring are **heuristics**, not full engine analysis. They are intended as lightweight coaching signals and may miss tactical/contextual nuances.
+Move quality and stage scoring are produced from a UCI engine (Stockfish-compatible) by measuring evaluation deltas before/after each player move.
+
+### Requirements for engine analysis
+
+- Install a UCI-compatible engine (for example Stockfish).
+- Install Python package:
+
+```bash
+pip install python-chess
+```
 
 ## Running tests
 

@@ -13,6 +13,9 @@ from __future__ import annotations
 
 import argparse
 import html
+import importlib
+import importlib.util
+import io
 import json
 import re
 from dataclasses import dataclass
@@ -40,6 +43,7 @@ class MoveReview:
     san: str
     tag: str
     reason: str
+    eval_delta_cp: int | None = None
 
 
 def parse_args() -> argparse.Namespace:
@@ -77,6 +81,17 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=8000,
         help="Port for UI server (default: 8000)",
+    )
+    parser.add_argument(
+        "--engine-path",
+        default="stockfish",
+        help="Path to UCI engine binary (default: stockfish)",
+    )
+    parser.add_argument(
+        "--engine-depth",
+        type=int,
+        default=12,
+        help="Engine search depth for per-move analysis (default: 12)",
     )
     return parser.parse_args()
 
@@ -125,7 +140,7 @@ def get_games_from_archives(archives: list[str], cutoff_epoch: int) -> list[dict
             if isinstance(game, dict) and isinstance(end_time, int) and end_time >= cutoff_epoch:
                 games.append(game)
 
-    games.sort(key=lambda game: game.get("end_time", 0))
+    games.sort(key=lambda game: game.get("end_time", 0), reverse=True)
     return games
 
 
@@ -246,34 +261,100 @@ def stage_grade(score: float) -> str:
     return "F"
 
 
-def analyze_game(game: dict[str, Any], username: str) -> dict[str, Any]:
+def _load_python_chess() -> tuple[Any, Any, Any]:
+    if importlib.util.find_spec("chess") is None:
+        raise RuntimeError(
+            "python-chess is required for engine analysis. Install with: pip install python-chess"
+        )
+    chess = importlib.import_module("chess")
+    chess_pgn = importlib.import_module("chess.pgn")
+    chess_engine = importlib.import_module("chess.engine")
+    return chess, chess_pgn, chess_engine
+
+
+def evaluate_cp(engine: Any, board: Any, pov_color: Any, depth: int, chess_engine: Any) -> int:
+    info = engine.analyse(board, chess_engine.Limit(depth=depth))
+    score_obj = info["score"].pov(pov_color)
+    return int(score_obj.score(mate_score=100000))
+
+
+def analyze_game_with_engine(
+    game: dict[str, Any],
+    username: str,
+    engine_path: str,
+    engine_depth: int,
+) -> dict[str, Any]:
     player_color = get_player_color(game, username)
     if player_color is None:
         raise RuntimeError("Username not present in game payload")
 
-    tokens = extract_san_tokens(str(game.get("pgn", "")))
-    player_is_white = player_color == "white"
+    chess, chess_pgn, chess_engine = _load_python_chess()
+    pgn_text = str(game.get("pgn", ""))
+    parsed_game = chess_pgn.read_game(io.StringIO(pgn_text))
+    if parsed_game is None:
+        raise RuntimeError("Could not parse PGN for engine analysis")
 
+    board = parsed_game.board()
+    player_is_white = player_color == "white"
+    pov_color = chess.WHITE if player_is_white else chess.BLACK
     highlights: list[MoveReview] = []
     stage_nets: dict[str, list[int]] = {"opening": [], "midgame": [], "endgame": []}
+    eval_deltas: list[int] = []
 
-    for idx, san in enumerate(tokens):
-        ply = idx + 1
-        is_white_move = idx % 2 == 0
-        if is_white_move != player_is_white:
-            continue
+    try:
+        with chess_engine.SimpleEngine.popen_uci(engine_path) as engine:
+            node = parsed_game
+            ply = 0
+            while node.variations:
+                next_node = node.variations[0]
+                move = next_node.move
+                ply += 1
 
-        tag, reason, net = review_move(san, ply)
-        stage_nets[get_stage_for_ply(ply)].append(net)
-        if tag is not None:
-            highlights.append(MoveReview(ply=ply, san=san, tag=tag, reason=reason))
+                if board.turn == pov_color:
+                    eval_before = evaluate_cp(engine, board, pov_color, engine_depth, chess_engine)
+                    san = board.san(move)
+                    board.push(move)
+                    eval_after = evaluate_cp(engine, board, pov_color, engine_depth, chess_engine)
+                    delta = eval_after - eval_before
+                    eval_deltas.append(delta)
+
+                    stage_nets[get_stage_for_ply(ply)].append(delta)
+
+                    if delta >= 80:
+                        highlights.append(
+                            MoveReview(
+                                ply=ply,
+                                san=san,
+                                tag="good",
+                                reason="engine evaluation improved significantly",
+                                eval_delta_cp=delta,
+                            )
+                        )
+                    elif delta <= -80:
+                        highlights.append(
+                            MoveReview(
+                                ply=ply,
+                                san=san,
+                                tag="bad",
+                                reason="engine evaluation dropped significantly",
+                                eval_delta_cp=delta,
+                            )
+                        )
+                else:
+                    board.push(move)
+
+                node = next_node
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            f"Engine binary not found at '{engine_path}'. Install Stockfish or pass --engine-path."
+        ) from exc
 
     def stage_score(values: list[int]) -> dict[str, Any]:
         if not values:
             raw = 0.0
         else:
             raw = sum(values) / len(values)
-        score = max(0.0, min(100.0, 60.0 + raw * 12.0))
+        score = max(0.0, min(100.0, 60.0 + raw / 10.0))
         return {"score": round(score, 1), "grade": stage_grade(score), "sample_size": len(values)}
 
     opening_name = detect_opening(game)
@@ -292,12 +373,19 @@ def analyze_game(game: dict[str, Any], username: str) -> dict[str, Any]:
             "midgame": stage_score(stage_nets["midgame"]),
             "endgame": stage_score(stage_nets["endgame"]),
         },
+        "engine_depth": engine_depth,
+        "average_eval_delta_cp": round(sum(eval_deltas) / len(eval_deltas), 1) if eval_deltas else 0.0,
         "good_moves": [h.__dict__ for h in highlights if h.tag == "good"],
         "bad_moves": [h.__dict__ for h in highlights if h.tag == "bad"],
     }
 
 
-def analyze_recent_games(username: str, days: int) -> dict[str, Any]:
+def analyze_recent_games(
+    username: str,
+    days: int,
+    engine_path: str,
+    engine_depth: int,
+) -> dict[str, Any]:
     now_utc = datetime.now(timezone.utc)
     cutoff = now_utc - timedelta(days=days)
     cutoff_epoch = int(cutoff.timestamp())
@@ -305,13 +393,18 @@ def analyze_recent_games(username: str, days: int) -> dict[str, Any]:
     archives = get_relevant_archives(username, cutoff)
     games = get_games_from_archives(archives, cutoff_epoch)
 
-    analyzed_games = [analyze_game(game, username) for game in games]
+    analyzed_games = [
+        analyze_game_with_engine(game, username, engine_path=engine_path, engine_depth=engine_depth)
+        for game in games
+    ]
 
     return {
         "username": username,
         "retrieved_at_utc": now_utc.isoformat(),
         "cutoff_utc": cutoff.isoformat(),
         "days": days,
+        "engine_path": engine_path,
+        "engine_depth": engine_depth,
         "game_count": len(analyzed_games),
         "games": analyzed_games,
     }
@@ -375,12 +468,12 @@ def render_html(result: dict[str, Any], error: str | None = None) -> str:
         "<label>Username<br><input name='username' required></label><br>"
         "<label>Days<br><input name='days' type='number' value='61' min='1' max='365'></label><br>"
         "<button type='submit'>Analyze</button></form>"
-        "<p><em>Note: move quality and stage scores are heuristic estimates, not engine analysis.</em></p>"
+        "<p><em>Note: move quality and stage scores come from engine evaluation deltas and may still miss long-horizon ideas.</em></p>"
         f"{summary}</body></html>"
     )
 
 
-def run_ui(host: str, port: int) -> None:
+def run_ui(host: str, port: int, engine_path: str, engine_depth: int) -> None:
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802
             parsed = urlparse(self.path)
@@ -406,7 +499,12 @@ def run_ui(host: str, port: int) -> None:
 
                 if username:
                     try:
-                        result = analyze_recent_games(username, days)
+                        result = analyze_recent_games(
+                            username,
+                            days,
+                            engine_path=engine_path,
+                            engine_depth=engine_depth,
+                        )
                     except RuntimeError as exc:
                         error = str(exc)
                 else:
@@ -430,13 +528,18 @@ def run_ui(host: str, port: int) -> None:
 def main() -> None:
     args = parse_args()
     if args.ui:
-        run_ui(args.host, args.port)
+        run_ui(args.host, args.port, args.engine_path, args.engine_depth)
         return
 
     if not args.username:
         raise SystemExit("username is required unless --ui is used")
 
-    result = analyze_recent_games(args.username, args.days)
+    result = analyze_recent_games(
+        args.username,
+        args.days,
+        engine_path=args.engine_path,
+        engine_depth=args.engine_depth,
+    )
     output_path = Path(args.output)
     output_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
     print(f"Saved analysis for {result['game_count']} games to {output_path}")
