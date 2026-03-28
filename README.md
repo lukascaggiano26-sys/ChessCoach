@@ -4,7 +4,7 @@ A Python tool that downloads a player's recent Chess.com games, runs engine-back
 
 ## Features
 
-- Pulls all games from the last two months by default (`--days 61`)
+- Pulls games from the last 3 days by default (`--days 3`)
 - Detects opening name from Chess.com metadata
 - Highlights engine-evaluated "good" and "bad" moves for the selected player
 - Rates performance by game stage:
@@ -23,7 +23,7 @@ python3 chesscom_recent_games.py <chesscom_username> --output recent_games_analy
 ### CLI options
 
 - `--output`, `-o`: output file path (default `recent_games_analysis.json`)
-- `--days`: lookback window in days (default `61`)
+- `--days`: lookback window in days (default `3`)
 - `--ui`: run a local web UI instead of one-shot CLI output
 - `--host`: UI host (default `127.0.0.1`)
 - `--port`: UI port (default `8000`)
@@ -36,7 +36,8 @@ python3 chesscom_recent_games.py <chesscom_username> --output recent_games_analy
 python3 chesscom_recent_games.py --ui
 ```
 
-Then open `http://127.0.0.1:8000`, enter a username, and click **Analyze**.
+Then open `http://127.0.0.1:8000`, enter a username, and click **Show games**.
+From there, click a specific game to run analysis on-demand (engine work starts only for the clicked game).
 
 ## Output JSON
 

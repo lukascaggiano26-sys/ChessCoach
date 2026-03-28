@@ -25,7 +25,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote_plus, urlparse
 from urllib.request import Request, urlopen
 
 CHESSCOM_BASE = "https://api.chess.com/pub/player"
@@ -64,8 +64,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--days",
         type=int,
-        default=61,
-        help="How many days back to include (default: 61)",
+        default=3,
+        help="How many days back to include (default: 3)",
     )
     parser.add_argument(
         "--ui",
@@ -438,12 +438,10 @@ def analyze_recent_games(
     engine_path: str,
     engine_depth: int,
 ) -> dict[str, Any]:
-    now_utc = datetime.now(timezone.utc)
-    cutoff = now_utc - timedelta(days=days)
-    cutoff_epoch = int(cutoff.timestamp())
-
-    archives = get_relevant_archives(username, cutoff)
-    games = get_games_from_archives(archives, cutoff_epoch)
+    recent = fetch_recent_games(username, days)
+    games = recent["games"]
+    now_utc = recent["retrieved_at_utc"]
+    cutoff = recent["cutoff_utc"]
 
     engine_error: str | None = None
     analyzed_games: list[dict[str, Any]]
@@ -460,8 +458,8 @@ def analyze_recent_games(
 
     return {
         "username": username,
-        "retrieved_at_utc": now_utc.isoformat(),
-        "cutoff_utc": cutoff.isoformat(),
+        "retrieved_at_utc": now_utc,
+        "cutoff_utc": cutoff,
         "days": days,
         "engine_path": engine_path,
         "engine_depth": engine_depth,
@@ -472,115 +470,212 @@ def analyze_recent_games(
     }
 
 
-def render_html(result: dict[str, Any], error: str | None = None) -> str:
-    summary = ""
-    if error:
-        summary = f"<p style='color:#b00020;'><strong>Error:</strong> {html.escape(error)}</p>"
-    elif result:
-        mode_note = ""
-        if result.get("analysis_mode") == "heuristic_fallback":
-            mode_note = (
-                "<p style='color:#8a5a00;'><strong>Engine unavailable:</strong> "
-                f"{html.escape(str(result.get('engine_error', 'Unknown engine error')))} "
-                "Showing heuristic fallback analysis.</p>"
-            )
-        cards = []
-        for game in result.get("games", []):
-            stage = game.get("stage_performance", {})
-            opening_stage = stage.get("opening", {"score": "n/a", "grade": "n/a"})
-            midgame_stage = stage.get("midgame", {"score": "n/a", "grade": "n/a"})
-            endgame_stage = stage.get("endgame", {"score": "n/a", "grade": "n/a"})
-            good_moves = game.get("good_moves", [])
-            bad_moves = game.get("bad_moves", [])
+def fetch_recent_games(username: str, days: int) -> dict[str, Any]:
+    now_utc = datetime.now(timezone.utc)
+    cutoff = now_utc - timedelta(days=days)
+    cutoff_epoch = int(cutoff.timestamp())
 
-            good_items = "".join(
-                f"<li>Ply {m['ply']}: {html.escape(m['san'])} — {html.escape(m['reason'])}</li>"
-                for m in good_moves[:10]
-            ) or "<li>None flagged by heuristic.</li>"
-            bad_items = "".join(
-                f"<li>Ply {m['ply']}: {html.escape(m['san'])} — {html.escape(m['reason'])}</li>"
-                for m in bad_moves[:10]
-            ) or "<li>None flagged by heuristic.</li>"
+    archives = get_relevant_archives(username, cutoff)
+    games = get_games_from_archives(archives, cutoff_epoch)
 
-            cards.append(
-                "<details><summary>"
-                f"{html.escape(str(game.get('opening', 'Unknown')))} | "
-                f"{html.escape(str(game.get('time_class', 'n/a')))} | "
-                f"result: {html.escape(str(game.get('player_result', 'unknown')))}"
-                "</summary>"
-                f"<p><a href='{html.escape(str(game.get('url', '#')))}' target='_blank'>Open game</a></p>"
-                "<ul>"
-                f"<li>Opening: {opening_stage['score']} ({opening_stage['grade']})</li>"
-                f"<li>Midgame: {midgame_stage['score']} ({midgame_stage['grade']})</li>"
-                f"<li>Endgame: {endgame_stage['score']} ({endgame_stage['grade']})</li>"
-                "</ul>"
-                "<p><strong>Good moves</strong></p><ul>"
-                f"{good_items}"
-                "</ul><p><strong>Bad moves</strong></p><ul>"
-                f"{bad_items}"
-                "</ul></details>"
-            )
+    return {
+        "username": username,
+        "retrieved_at_utc": now_utc.isoformat(),
+        "cutoff_utc": cutoff.isoformat(),
+        "days": days,
+        "game_count": len(games),
+        "games": games,
+    }
 
-        summary = (
-            f"<p>Found <strong>{result.get('game_count', 0)}</strong> games for "
-            f"<strong>{html.escape(str(result.get('username', '')))}</strong>.</p>"
-            + mode_note
-            + "".join(cards)
-        )
 
+def _shell_layout(title: str, body: str) -> str:
     return (
-        "<!doctype html><html><head><meta charset='utf-8'><title>ChessCoach Review</title>"
-        "<style>body{font-family:Arial,sans-serif;max-width:950px;margin:2rem auto;padding:0 1rem;}"
-        "input,button{padding:.5rem;margin:.25rem 0;}details{margin:1rem 0;padding:.5rem;border:1px solid #ddd;}"
-        "</style></head><body>"
-        "<h1>Chess.com Recent Game Review</h1>"
-        "<form method='get' action='/analyze'>"
-        "<label>Username<br><input name='username' required></label><br>"
-        "<label>Days<br><input name='days' type='number' value='61' min='1' max='365'></label><br>"
-        "<button type='submit'>Analyze</button></form>"
-        "<p><em>Note: move quality and stage scores come from engine evaluation deltas and may still miss long-horizon ideas.</em></p>"
-        f"{summary}</body></html>"
+        "<!doctype html><html><head><meta charset='utf-8'>"
+        f"<title>{html.escape(title)}</title>"
+        "<style>"
+        "body{font-family:Inter,Arial,sans-serif;background:#262421;color:#f5f5f5;margin:0;}"
+        ".top{background:#312e2b;padding:12px 18px;font-weight:700;border-bottom:1px solid #3b3936;}"
+        ".wrap{max-width:1100px;margin:0 auto;padding:18px;}"
+        ".panel{background:#312e2b;border:1px solid #3b3936;border-radius:8px;padding:16px;margin-bottom:14px;}"
+        "a{color:#81b64c;text-decoration:none;} a:hover{text-decoration:underline;}"
+        "input,button{padding:.6rem;border-radius:6px;border:1px solid #555;background:#1f1f1f;color:#fff;}"
+        "button{background:#81b64c;color:#111;font-weight:700;border:none;cursor:pointer;}"
+        ".game{display:flex;justify-content:space-between;align-items:center;padding:10px;border-bottom:1px solid #3b3936;}"
+        ".muted{color:#b7b7b7;font-size:.92rem;}"
+        ".chip{background:#3b3936;color:#ddd;padding:3px 8px;border-radius:12px;font-size:.8rem;}"
+        "</style></head><body><div class='top'>ChessCoach • Rapid Review</div><div class='wrap'>"
+        f"{body}</div></body></html>"
     )
+
+
+def render_home(error: str | None = None) -> str:
+    err = f"<p style='color:#ff8f8f'>{html.escape(error)}</p>" if error else ""
+    body = (
+        "<div class='panel'><h2>Load your recent games</h2>"
+        "<form method='get' action='/games'>"
+        "<label>Username</label><br><input name='username' required><br><br>"
+        "<label>Days</label><br><input name='days' type='number' value='3' min='1' max='365'><br><br>"
+        "<button type='submit'>Show games</button></form>"
+        "<p class='muted'>Engine analysis runs only when you open a specific game to save compute.</p>"
+        f"{err}</div>"
+    )
+    return _shell_layout("ChessCoach", body)
+
+
+def render_games_list(username: str, days: int, recent: dict[str, Any], error: str | None = None) -> str:
+    if error:
+        return render_home(error)
+    rows = []
+    for game in recent.get("games", []):
+        white = str(game.get("white", {}).get("username", "White"))
+        black = str(game.get("black", {}).get("username", "Black"))
+        tclass = str(game.get("time_class", "n/a"))
+        end_time = int(game.get("end_time", 0) or 0)
+        dt = datetime.fromtimestamp(end_time, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC") if end_time else "unknown"
+        url = str(game.get("url", ""))
+        review_href = f"/review?username={quote_plus(username)}&days={days}&game_url={quote_plus(url)}"
+        rows.append(
+            "<div class='game'>"
+            f"<div><strong>{html.escape(white)} vs {html.escape(black)}</strong> "
+            f"<span class='chip'>{html.escape(tclass)}</span><div class='muted'>{dt}</div></div>"
+            f"<a href='{review_href}'>Analyze</a>"
+            "</div>"
+        )
+    content = "".join(rows) or "<p>No games found for that range.</p>"
+    body = (
+        f"<div class='panel'><h2>{html.escape(username)} • Last {days} day(s)</h2>"
+        "<p class='muted'>Select a game to start engine+coach analysis.</p>"
+        f"{content}</div>"
+        "<div><a href='/'>← Back</a></div>"
+    )
+    return _shell_layout("Game List", body)
+
+
+def coach_advice(analysis: dict[str, Any]) -> list[str]:
+    """Energetic, practical coaching voice inspired by creator-style breakdowns."""
+    tips: list[str] = []
+    stage = analysis.get("stage_performance", {})
+    op = stage.get("opening", {}).get("score", 0)
+    mg = stage.get("midgame", {}).get("score", 0)
+    eg = stage.get("endgame", {}).get("score", 0)
+    bad = analysis.get("bad_moves", [])
+    good = analysis.get("good_moves", [])
+
+    tips.append("Love the ambition—now let’s turn this into clean, repeatable chess.")
+    if op < 55:
+        tips.append("Opening needs structure: prioritize development + king safety before side adventures.")
+    if mg < 55:
+        tips.append("Midgame focus: pause and ask, 'What changed after my opponent’s move?'")
+    if eg < 55:
+        tips.append("Endgame discipline: activate king early and convert with simple plans, not flashy moves.")
+    if bad:
+        first_bad = bad[0]
+        tips.append(
+            f"Critical moment: ply {first_bad.get('ply')} ({first_bad.get('san')}) dropped your eval—slow down there."
+        )
+    if good:
+        first_good = good[0]
+        tips.append(
+            f"Keep this energy: ply {first_good.get('ply')} ({first_good.get('san')}) was a strong practical decision."
+        )
+    tips.append("Training task: review this game once without engine, then once with engine and compare your candidate moves.")
+    return tips
+
+
+def render_review(username: str, days: int, analysis: dict[str, Any], mode_note: str | None = None) -> str:
+    stage = analysis.get("stage_performance", {})
+    opening_stage = stage.get("opening", {"score": "n/a", "grade": "n/a"})
+    midgame_stage = stage.get("midgame", {"score": "n/a", "grade": "n/a"})
+    endgame_stage = stage.get("endgame", {"score": "n/a", "grade": "n/a"})
+    good_items = "".join(
+        f"<li>Ply {m['ply']}: {html.escape(m['san'])} ({html.escape(m['reason'])})</li>"
+        for m in analysis.get("good_moves", [])[:10]
+    ) or "<li>No strong positive swings flagged.</li>"
+    bad_items = "".join(
+        f"<li>Ply {m['ply']}: {html.escape(m['san'])} ({html.escape(m['reason'])})</li>"
+        for m in analysis.get("bad_moves", [])[:10]
+    ) or "<li>No major drops flagged.</li>"
+    tips = "".join(f"<li>{html.escape(t)}</li>" for t in coach_advice(analysis))
+    warning = f"<p style='color:#ffcd73'>{html.escape(mode_note)}</p>" if mode_note else ""
+    body = (
+        "<div class='panel'>"
+        f"<h2>{html.escape(str(analysis.get('opening', 'Unknown Opening')))}</h2>"
+        f"<p><span class='chip'>{html.escape(str(analysis.get('time_class', 'n/a')))}</span> "
+        f"Result: <strong>{html.escape(str(analysis.get('player_result', 'unknown')))}</strong></p>"
+        f"{warning}"
+        "<ul>"
+        f"<li>Opening score: {opening_stage['score']} ({opening_stage['grade']})</li>"
+        f"<li>Midgame score: {midgame_stage['score']} ({midgame_stage['grade']})</li>"
+        f"<li>Endgame score: {endgame_stage['score']} ({endgame_stage['grade']})</li>"
+        "</ul>"
+        "<p><strong>Good moves</strong></p><ul>" + good_items + "</ul>"
+        "<p><strong>Bad moves</strong></p><ul>" + bad_items + "</ul>"
+        "<p><strong>Coach notes (Akeem-style energy)</strong></p><ul>" + tips + "</ul>"
+        f"<p><a target='_blank' href='{html.escape(str(analysis.get('url', '#')))}'>Open full game on Chess.com</a></p>"
+        "</div>"
+        f"<div><a href='/games?username={html.escape(username)}&days={days}'>← Back to game list</a></div>"
+    )
+    return _shell_layout("Game Review", body)
 
 
 def run_ui(host: str, port: int, engine_path: str, engine_depth: int) -> None:
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802
             parsed = urlparse(self.path)
-            if parsed.path not in {"/", "/analyze"}:
+            if parsed.path not in {"/", "/games", "/review"}:
                 self.send_response(404)
                 self.end_headers()
                 self.wfile.write(b"Not Found")
                 return
 
-            result: dict[str, Any] = {}
-            error: str | None = None
-
-            if parsed.path == "/analyze":
+            if parsed.path == "/":
+                payload = render_home().encode("utf-8")
+            elif parsed.path == "/games":
                 params = parse_qs(parsed.query)
                 username = params.get("username", [""])[0].strip()
-                days_raw = params.get("days", ["61"])[0]
+                days_raw = params.get("days", ["3"])[0]
                 try:
                     days = int(days_raw)
                     if days < 1:
                         raise ValueError("days must be >= 1")
                 except ValueError:
-                    days = 61
+                    days = 3
 
                 if username:
                     try:
-                        result = analyze_recent_games(
-                            username,
-                            days,
-                            engine_path=engine_path,
-                            engine_depth=engine_depth,
-                        )
+                        recent = fetch_recent_games(username, days)
+                        payload = render_games_list(username, days, recent).encode("utf-8")
                     except RuntimeError as exc:
-                        error = str(exc)
+                        payload = render_games_list(username, days, {}, error=str(exc)).encode("utf-8")
                 else:
-                    error = "Please provide a username."
+                    payload = render_home("Please provide a username.").encode("utf-8")
+            else:  # /review
+                params = parse_qs(parsed.query)
+                username = params.get("username", [""])[0].strip()
+                game_url = params.get("game_url", [""])[0].strip()
+                days_raw = params.get("days", ["3"])[0]
+                try:
+                    days = int(days_raw)
+                except ValueError:
+                    days = 3
+                if not username or not game_url:
+                    payload = render_home("Missing username or game URL.").encode("utf-8")
+                else:
+                    try:
+                        recent = fetch_recent_games(username, days)
+                        target = next((g for g in recent["games"] if str(g.get("url", "")) == game_url), None)
+                        if target is None:
+                            raise RuntimeError("Game not found in current date window.")
+                        mode_note = None
+                        try:
+                            analysis = analyze_game_with_engine(target, username, engine_path, engine_depth)
+                        except RuntimeError as exc:
+                            analysis = analyze_game_heuristic(target, username)
+                            mode_note = f"{exc} | Using heuristic fallback."
+                        payload = render_review(username, days, analysis, mode_note=mode_note).encode("utf-8")
+                    except RuntimeError as exc:
+                        payload = render_home(str(exc)).encode("utf-8")
 
-            payload = render_html(result, error).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(payload)))
