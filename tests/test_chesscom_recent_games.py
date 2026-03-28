@@ -69,6 +69,25 @@ class ChessCoachAnalysisTests(unittest.TestCase):
 
         self.assertEqual([g["id"] for g in games], ["new", "mid", "old"])
 
+    def test_analyze_game_heuristic_shape(self):
+        game = {
+            "white": {"username": "SampleUser", "result": "win"},
+            "black": {"username": "Other", "result": "checkmated"},
+            "pgn": """[Event \"Live Chess\"]
+[Opening \"Italian Game\"]
+
+1. e4 e5 2. Nf3 Nc6 3. Bc4 Bc5 4. O-O Nf6 1-0
+""",
+            "url": "https://www.chess.com/game/live/123",
+            "time_class": "blitz",
+            "rated": True,
+            "end_time": 1700000000,
+        }
+        analyzed = cc.analyze_game_heuristic(game, "SampleUser")
+        self.assertEqual(analyzed["opening"], "Italian Game")
+        self.assertIn("stage_performance", analyzed)
+        self.assertIsNone(analyzed["engine_depth"])
+
 
 if __name__ == "__main__":
     unittest.main()

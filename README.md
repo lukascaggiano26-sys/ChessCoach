@@ -60,8 +60,16 @@ Move quality and stage scoring are produced from a UCI engine (Stockfish-compati
 - Install Python package:
 
 ```bash
-pip install python-chess
+python3 -m pip install python-chess
 ```
+
+If `python-chess` is installed for a different interpreter, run:
+
+```bash
+$(which python3) -m pip install python-chess
+```
+
+When engine dependencies are missing, the app now falls back to heuristic analysis and shows an explicit warning in CLI/UI output instead of crashing.
 
 ## Running tests
 

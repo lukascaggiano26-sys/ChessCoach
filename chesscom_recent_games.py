@@ -18,6 +18,7 @@ import importlib.util
 import io
 import json
 import re
+import sys
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -264,7 +265,8 @@ def stage_grade(score: float) -> str:
 def _load_python_chess() -> tuple[Any, Any, Any]:
     if importlib.util.find_spec("chess") is None:
         raise RuntimeError(
-            "python-chess is required for engine analysis. Install with: pip install python-chess"
+            "python-chess is required for engine analysis. "
+            f"Install it for this interpreter with: {sys.executable} -m pip install python-chess"
         )
     chess = importlib.import_module("chess")
     chess_pgn = importlib.import_module("chess.pgn")
@@ -380,6 +382,56 @@ def analyze_game_with_engine(
     }
 
 
+def analyze_game_heuristic(game: dict[str, Any], username: str) -> dict[str, Any]:
+    """Fallback analysis path used when engine dependencies are unavailable."""
+    player_color = get_player_color(game, username)
+    if player_color is None:
+        raise RuntimeError("Username not present in game payload")
+
+    tokens = extract_san_tokens(str(game.get("pgn", "")))
+    player_is_white = player_color == "white"
+
+    highlights: list[MoveReview] = []
+    stage_nets: dict[str, list[int]] = {"opening": [], "midgame": [], "endgame": []}
+
+    for idx, san in enumerate(tokens):
+        ply = idx + 1
+        is_white_move = idx % 2 == 0
+        if is_white_move != player_is_white:
+            continue
+
+        tag, reason, net = review_move(san, ply)
+        stage_nets[get_stage_for_ply(ply)].append(net)
+        if tag is not None:
+            highlights.append(MoveReview(ply=ply, san=san, tag=tag, reason=reason, eval_delta_cp=None))
+
+    def stage_score(values: list[int]) -> dict[str, Any]:
+        raw = (sum(values) / len(values)) if values else 0.0
+        score = max(0.0, min(100.0, 60.0 + raw * 12.0))
+        return {"score": round(score, 1), "grade": stage_grade(score), "sample_size": len(values)}
+
+    opening_name = detect_opening(game)
+    player_result = str(game.get(player_color, {}).get("result", "unknown"))
+    return {
+        "url": game.get("url"),
+        "time_class": game.get("time_class"),
+        "rated": game.get("rated"),
+        "end_time": game.get("end_time"),
+        "player_color": player_color,
+        "player_result": player_result,
+        "opening": opening_name,
+        "stage_performance": {
+            "opening": stage_score(stage_nets["opening"]),
+            "midgame": stage_score(stage_nets["midgame"]),
+            "endgame": stage_score(stage_nets["endgame"]),
+        },
+        "engine_depth": None,
+        "average_eval_delta_cp": None,
+        "good_moves": [h.__dict__ for h in highlights if h.tag == "good"],
+        "bad_moves": [h.__dict__ for h in highlights if h.tag == "bad"],
+    }
+
+
 def analyze_recent_games(
     username: str,
     days: int,
@@ -393,10 +445,18 @@ def analyze_recent_games(
     archives = get_relevant_archives(username, cutoff)
     games = get_games_from_archives(archives, cutoff_epoch)
 
-    analyzed_games = [
-        analyze_game_with_engine(game, username, engine_path=engine_path, engine_depth=engine_depth)
-        for game in games
-    ]
+    engine_error: str | None = None
+    analyzed_games: list[dict[str, Any]]
+    try:
+        analyzed_games = [
+            analyze_game_with_engine(game, username, engine_path=engine_path, engine_depth=engine_depth)
+            for game in games
+        ]
+        analysis_mode = "engine"
+    except RuntimeError as exc:
+        engine_error = str(exc)
+        analyzed_games = [analyze_game_heuristic(game, username) for game in games]
+        analysis_mode = "heuristic_fallback"
 
     return {
         "username": username,
@@ -405,6 +465,8 @@ def analyze_recent_games(
         "days": days,
         "engine_path": engine_path,
         "engine_depth": engine_depth,
+        "analysis_mode": analysis_mode,
+        "engine_error": engine_error,
         "game_count": len(analyzed_games),
         "games": analyzed_games,
     }
@@ -415,6 +477,13 @@ def render_html(result: dict[str, Any], error: str | None = None) -> str:
     if error:
         summary = f"<p style='color:#b00020;'><strong>Error:</strong> {html.escape(error)}</p>"
     elif result:
+        mode_note = ""
+        if result.get("analysis_mode") == "heuristic_fallback":
+            mode_note = (
+                "<p style='color:#8a5a00;'><strong>Engine unavailable:</strong> "
+                f"{html.escape(str(result.get('engine_error', 'Unknown engine error')))} "
+                "Showing heuristic fallback analysis.</p>"
+            )
         cards = []
         for game in result.get("games", []):
             stage = game.get("stage_performance", {})
@@ -455,6 +524,7 @@ def render_html(result: dict[str, Any], error: str | None = None) -> str:
         summary = (
             f"<p>Found <strong>{result.get('game_count', 0)}</strong> games for "
             f"<strong>{html.escape(str(result.get('username', '')))}</strong>.</p>"
+            + mode_note
             + "".join(cards)
         )
 
