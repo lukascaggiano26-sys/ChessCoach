@@ -7,6 +7,11 @@ Features:
 - Heuristically tag good/bad moves for the player
 - Score player performance by stage: opening, middlegame, endgame
 - Optional built-in local web UI (--ui)
+"""Fetch all Chess.com games for a player from the past two months.
+
+This script uses the public Chess.com API:
+- GET /pub/player/{username}/games/archives
+- GET monthly archive URLs returned above
 """
 
 from __future__ import annotations
@@ -22,6 +27,11 @@ from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlparse
+import json
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 CHESSCOM_BASE = "https://api.chess.com/pub/player"
@@ -55,6 +65,16 @@ def parse_args() -> argparse.Namespace:
         "-o",
         default="recent_games_analysis.json",
         help="Output JSON file path (default: recent_games_analysis.json)",
+            "Download every Chess.com game for a user played in the past two months "
+            "and write the results to JSON."
+        )
+    )
+    parser.add_argument("username", help="Chess.com username")
+    parser.add_argument(
+        "--output",
+        "-o",
+        default="recent_games.json",
+        help="Output JSON file path (default: recent_games.json)",
     )
     parser.add_argument(
         "--days",
@@ -77,12 +97,24 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=8000,
         help="Port for UI server (default: 8000)",
+        help=(
+            "How many days back to include; defaults to 61 to safely cover two months "
+            "regardless of month length"
+        ),
     )
     return parser.parse_args()
 
 
 def fetch_json(url: str, timeout: int = DEFAULT_TIMEOUT_SECONDS) -> dict[str, Any]:
     request = Request(url, headers={"User-Agent": "ChessCoach/1.0 (review tool)"})
+def month_key_from_archive_url(url: str) -> tuple[int, int]:
+    # Archive URLs end in .../YYYY/MM
+    year_str, month_str = url.rstrip("/").split("/")[-2:]
+    return int(year_str), int(month_str)
+
+
+def fetch_json(url: str, timeout: int = DEFAULT_TIMEOUT_SECONDS) -> dict[str, Any]:
+    request = Request(url, headers={"User-Agent": "ChessCoach/1.0 (recent game downloader)"})
     try:
         with urlopen(request, timeout=timeout) as response:
             return json.loads(response.read().decode("utf-8"))
@@ -106,10 +138,12 @@ def get_relevant_archives(username: str, cutoff: datetime) -> list[str]:
 
     cutoff_month = (cutoff.year, cutoff.month)
     return [
+    selected = [
         url
         for url in archives
         if isinstance(url, str) and month_key_from_archive_url(url) >= cutoff_month
     ]
+    return selected
 
 
 def get_games_from_archives(archives: list[str], cutoff_epoch: int) -> list[dict[str, Any]]:
@@ -123,6 +157,12 @@ def get_games_from_archives(archives: list[str], cutoff_epoch: int) -> list[dict
         for game in monthly_games:
             end_time = game.get("end_time")
             if isinstance(game, dict) and isinstance(end_time, int) and end_time >= cutoff_epoch:
+            if not isinstance(game, dict):
+                continue
+
+            # Chess.com game objects include 'end_time' UNIX timestamp.
+            end_time = game.get("end_time")
+            if isinstance(end_time, int) and end_time >= cutoff_epoch:
                 games.append(game)
 
     games.sort(key=lambda game: game.get("end_time", 0))
@@ -435,6 +475,28 @@ def main() -> None:
     output_path = Path(args.output)
     output_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
     print(f"Saved analysis for {result['game_count']} games to {output_path}")
+def main() -> None:
+    args = parse_args()
+    now_utc = datetime.now(timezone.utc)
+    cutoff = now_utc - timedelta(days=args.days)
+    cutoff_epoch = int(cutoff.timestamp())
+
+    archives = get_relevant_archives(args.username, cutoff)
+    games = get_games_from_archives(archives, cutoff_epoch)
+
+    result = {
+        "username": args.username,
+        "retrieved_at_utc": now_utc.isoformat(),
+        "cutoff_utc": cutoff.isoformat(),
+        "days": args.days,
+        "game_count": len(games),
+        "games": games,
+    }
+
+    output_path = Path(args.output)
+    output_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
+
+    print(f"Saved {len(games)} games to {output_path}")
 
 
 if __name__ == "__main__":
