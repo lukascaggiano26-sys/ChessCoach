@@ -1,27 +1,58 @@
 # ChessCoach
 
-Utility script for pulling all Chess.com game information from the past two months.
+A dependency-free Python tool that downloads a player's recent Chess.com games, reviews each game, and provides quick insights.
 
-## Usage
+## Features
+
+- Pulls all games from the last two months by default (`--days 61`)
+- Detects opening name from Chess.com metadata
+- Highlights heuristic "good" and "bad" moves for the selected player
+- Rates performance by game stage:
+  - opening
+  - midgame
+  - endgame
+- Includes a simple browser UI for username input and report viewing
+
+## CLI usage
 
 ```bash
-python3 chesscom_recent_games.py <chesscom_username> --output recent_games.json
+python3 chesscom_recent_games.py <chesscom_username> --output recent_games_analysis.json
 ```
 
-### Options
+### CLI options
 
-- `--output`, `-o`: output file path (default `recent_games.json`)
-- `--days`: lookback window in days (default `61`, which safely covers two months)
+- `--output`, `-o`: output file path (default `recent_games_analysis.json`)
+- `--days`: lookback window in days (default `61`)
+- `--ui`: run a local web UI instead of one-shot CLI output
+- `--host`: UI host (default `127.0.0.1`)
+- `--port`: UI port (default `8000`)
 
-## Output
+## UI usage
 
-The script saves a JSON document with:
+```bash
+python3 chesscom_recent_games.py --ui
+```
+
+Then open `http://127.0.0.1:8000`, enter a username, and click **Analyze**.
+
+## Output JSON
+
+The generated JSON includes:
 
 - metadata (`username`, retrieval timestamp, cutoff timestamp)
 - `game_count`
-- `games`: full game objects as returned by Chess.com's API for games ending on/after the cutoff
+- `games` with:
+  - opening
+  - game URL/result/time class
+  - stage performance scores + letter grades
+  - lists of flagged good and bad moves
 
-## Notes
+## Important note
 
-- Uses Chess.com public archive endpoints.
-- Filters games by each game's `end_time` UNIX timestamp.
+Move quality and stage scoring are **heuristics**, not full engine analysis. They are intended as lightweight coaching signals and may miss tactical/contextual nuances.
+
+## Running tests
+
+```bash
+python3 -m unittest discover -s tests -p 'test_*.py'
+```
