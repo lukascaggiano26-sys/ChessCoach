@@ -7,6 +7,7 @@ A Python tool that downloads a player's recent Chess.com games, runs engine-back
 - Pulls games from the last 3 days by default (`--days 3`)
 - Detects opening name from Chess.com metadata
 - Highlights engine-evaluated "good" and "bad" moves for the selected player
+- Adds Chess.com-style move classes in review output (`Best`, `Excellent`, `Good`, `Inaccuracy`, `Mistake`, `Blunder`, plus `Great`/`Brilliant`/`Miss` heuristics)
 - Rates performance by game stage:
   - opening
   - midgame
@@ -53,11 +54,11 @@ The generated JSON includes:
 
 ## Important note
 
-Move quality and stage scoring are produced from a UCI engine (Stockfish-compatible) by measuring evaluation deltas before/after each player move.
+Move quality and stage scoring are produced from a UCI engine (Stockfish-compatible) by measuring evaluation deltas before/after each player move and expected-points loss.
 
 ### Requirements for engine analysis
 
-- Install a UCI-compatible engine (for example Stockfish).
+- Install a UCI-compatible engine (**Stockfish 18+ recommended** for best parity with latest review quality).
 - Install Python package:
 
 ```bash

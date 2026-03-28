@@ -280,6 +280,40 @@ def evaluate_cp(engine: Any, board: Any, pov_color: Any, depth: int, chess_engin
     return int(score_obj.score(mate_score=100000))
 
 
+def expected_points_from_cp(eval_cp: int, rating: int) -> float:
+    """Approximate expected points from centipawn eval and player rating."""
+    scale = max(220.0, 420.0 - (rating / 6.0))
+    return 1.0 / (1.0 + 10 ** (-eval_cp / scale))
+
+
+def material_points(board: Any, color: Any, chess: Any) -> int:
+    values = {
+        chess.PAWN: 1,
+        chess.KNIGHT: 3,
+        chess.BISHOP: 3,
+        chess.ROOK: 5,
+        chess.QUEEN: 9,
+    }
+    total = 0
+    for piece_type, val in values.items():
+        total += len(board.pieces(piece_type, color)) * val
+    return total
+
+
+def classify_expected_points_loss(loss: float) -> str:
+    if loss <= 0.0:
+        return "Best"
+    if loss < 0.02:
+        return "Excellent"
+    if loss < 0.05:
+        return "Good"
+    if loss < 0.10:
+        return "Inaccuracy"
+    if loss < 0.20:
+        return "Mistake"
+    return "Blunder"
+
+
 def analyze_game_with_engine(
     game: dict[str, Any],
     username: str,
@@ -299,12 +333,15 @@ def analyze_game_with_engine(
     board = parsed_game.board()
     player_is_white = player_color == "white"
     pov_color = chess.WHITE if player_is_white else chess.BLACK
+    player_rating = int(game.get(player_color, {}).get("rating", 1200) or 1200)
     highlights: list[MoveReview] = []
     stage_nets: dict[str, list[int]] = {"opening": [], "midgame": [], "endgame": []}
     eval_deltas: list[int] = []
+    reviewed_moves: list[dict[str, Any]] = []
 
     try:
         with chess_engine.SimpleEngine.popen_uci(engine_path) as engine:
+            engine_name = engine.id.get("name", "unknown")
             node = parsed_game
             ply = 0
             while node.variations:
@@ -314,13 +351,60 @@ def analyze_game_with_engine(
 
                 if board.turn == pov_color:
                     eval_before = evaluate_cp(engine, board, pov_color, engine_depth, chess_engine)
+                    multi = engine.analyse(
+                        board,
+                        chess_engine.Limit(depth=max(8, engine_depth - 2)),
+                        multipv=2,
+                    )
+                    if isinstance(multi, list):
+                        best_info = multi[0]
+                    else:
+                        best_info = multi
+                    best_move = best_info["pv"][0]
                     san = board.san(move)
+                    material_before = material_points(board, pov_color, chess)
                     board.push(move)
                     eval_after = evaluate_cp(engine, board, pov_color, engine_depth, chess_engine)
+                    material_after = material_points(board, pov_color, chess)
                     delta = eval_after - eval_before
                     eval_deltas.append(delta)
 
                     stage_nets[get_stage_for_ply(ply)].append(delta)
+
+                    best_board = parsed_game.board()
+                    replay_node = parsed_game
+                    replay_ply = 0
+                    while replay_ply < ply - 1 and replay_node.variations:
+                        replay_node = replay_node.variations[0]
+                        best_board.push(replay_node.move)
+                        replay_ply += 1
+                    best_board.push(best_move)
+                    best_eval_after = evaluate_cp(engine, best_board, pov_color, max(8, engine_depth - 2), chess_engine)
+
+                    expected_after = expected_points_from_cp(eval_after, player_rating)
+                    expected_best = expected_points_from_cp(best_eval_after, player_rating)
+                    ep_loss = max(0.0, expected_best - expected_after)
+                    classification = classify_expected_points_loss(ep_loss)
+
+                    is_sacrifice = (material_before - material_after) >= 3 and eval_after >= eval_before - 80
+                    if classification in {"Best", "Excellent"} and is_sacrifice and eval_before < 300:
+                        classification = "Brilliant"
+                    elif classification in {"Best", "Excellent"} and eval_after - eval_before >= 150:
+                        classification = "Great"
+                    elif classification in {"Inaccuracy", "Mistake", "Blunder"} and expected_best >= 0.75:
+                        classification = "Miss"
+
+                    reviewed_moves.append(
+                        {
+                            "ply": ply,
+                            "san": san,
+                            "classification": classification,
+                            "eval_before_cp": eval_before,
+                            "eval_after_cp": eval_after,
+                            "best_eval_after_cp": best_eval_after,
+                            "expected_points_loss": round(ep_loss, 3),
+                        }
+                    )
 
                     if delta >= 80:
                         highlights.append(
@@ -339,6 +423,16 @@ def analyze_game_with_engine(
                                 san=san,
                                 tag="bad",
                                 reason="engine evaluation dropped significantly",
+                                eval_delta_cp=delta,
+                            )
+                        )
+                    elif classification in {"Mistake", "Blunder", "Miss"}:
+                        highlights.append(
+                            MoveReview(
+                                ply=ply,
+                                san=san,
+                                tag="bad",
+                                reason=f"{classification} by expected-points model",
                                 eval_delta_cp=delta,
                             )
                         )
@@ -375,8 +469,11 @@ def analyze_game_with_engine(
             "midgame": stage_score(stage_nets["midgame"]),
             "endgame": stage_score(stage_nets["endgame"]),
         },
+        "engine_version": engine_name,
+        "engine_warning": None if "Stockfish 18" in str(engine_name) else "Use Stockfish 18+ for latest review quality.",
         "engine_depth": engine_depth,
         "average_eval_delta_cp": round(sum(eval_deltas) / len(eval_deltas), 1) if eval_deltas else 0.0,
+        "reviewed_moves": reviewed_moves,
         "good_moves": [h.__dict__ for h in highlights if h.tag == "good"],
         "bad_moves": [h.__dict__ for h in highlights if h.tag == "bad"],
     }
@@ -425,8 +522,11 @@ def analyze_game_heuristic(game: dict[str, Any], username: str) -> dict[str, Any
             "midgame": stage_score(stage_nets["midgame"]),
             "endgame": stage_score(stage_nets["endgame"]),
         },
+        "engine_version": None,
+        "engine_warning": "Engine unavailable. Install python-chess and Stockfish 18+.",
         "engine_depth": None,
         "average_eval_delta_cp": None,
+        "reviewed_moves": [],
         "good_moves": [h.__dict__ for h in highlights if h.tag == "good"],
         "bad_moves": [h.__dict__ for h in highlights if h.tag == "bad"],
     }
@@ -597,12 +697,28 @@ def render_review(username: str, days: int, analysis: dict[str, Any], mode_note:
     ) or "<li>No major drops flagged.</li>"
     tips = "".join(f"<li>{html.escape(t)}</li>" for t in coach_advice(analysis))
     warning = f"<p style='color:#ffcd73'>{html.escape(mode_note)}</p>" if mode_note else ""
+    engine_warning = analysis.get("engine_warning")
+    engine_meta = (
+        f"<p class='muted'>Engine: {html.escape(str(analysis.get('engine_version', 'n/a')))} "
+        f"(depth {html.escape(str(analysis.get('engine_depth', 'n/a')))}).</p>"
+    )
+    if engine_warning:
+        engine_meta += f"<p style='color:#ffcd73'>{html.escape(str(engine_warning))}</p>"
+    reviewed_rows = "".join(
+        "<tr>"
+        f"<td>{m.get('ply')}</td><td>{html.escape(str(m.get('san')))}</td>"
+        f"<td>{html.escape(str(m.get('classification')))}</td>"
+        f"<td>{m.get('expected_points_loss')}</td>"
+        "</tr>"
+        for m in analysis.get("reviewed_moves", [])[:20]
+    ) or "<tr><td colspan='4'>No engine move classifications available.</td></tr>"
     body = (
         "<div class='panel'>"
         f"<h2>{html.escape(str(analysis.get('opening', 'Unknown Opening')))}</h2>"
         f"<p><span class='chip'>{html.escape(str(analysis.get('time_class', 'n/a')))}</span> "
         f"Result: <strong>{html.escape(str(analysis.get('player_result', 'unknown')))}</strong></p>"
         f"{warning}"
+        f"{engine_meta}"
         "<ul>"
         f"<li>Opening score: {opening_stage['score']} ({opening_stage['grade']})</li>"
         f"<li>Midgame score: {midgame_stage['score']} ({midgame_stage['grade']})</li>"
@@ -610,6 +726,11 @@ def render_review(username: str, days: int, analysis: dict[str, Any], mode_note:
         "</ul>"
         "<p><strong>Good moves</strong></p><ul>" + good_items + "</ul>"
         "<p><strong>Bad moves</strong></p><ul>" + bad_items + "</ul>"
+        "<p><strong>Move classifications (Chess.com-style)</strong></p>"
+        "<table style='width:100%;border-collapse:collapse'>"
+        "<tr><th align='left'>Ply</th><th align='left'>Move</th><th align='left'>Class</th><th align='left'>EP Loss</th></tr>"
+        + reviewed_rows
+        + "</table>"
         "<p><strong>Coach notes (Akeem-style energy)</strong></p><ul>" + tips + "</ul>"
         f"<p><a target='_blank' href='{html.escape(str(analysis.get('url', '#')))}'>Open full game on Chess.com</a></p>"
         "</div>"

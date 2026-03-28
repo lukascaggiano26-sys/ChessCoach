@@ -88,6 +88,13 @@ class ChessCoachAnalysisTests(unittest.TestCase):
         self.assertIn("stage_performance", analyzed)
         self.assertIsNone(analyzed["engine_depth"])
 
+    def test_classify_expected_points_loss(self):
+        self.assertEqual(cc.classify_expected_points_loss(0.0), "Best")
+        self.assertEqual(cc.classify_expected_points_loss(0.03), "Good")
+        self.assertEqual(cc.classify_expected_points_loss(0.07), "Inaccuracy")
+        self.assertEqual(cc.classify_expected_points_loss(0.15), "Mistake")
+        self.assertEqual(cc.classify_expected_points_loss(0.25), "Blunder")
+
 
 if __name__ == "__main__":
     unittest.main()
