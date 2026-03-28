@@ -300,39 +300,6 @@ def material_points(board: Any, color: Any, chess: Any) -> int:
     return total
 
 
-def piece_name(piece: Any, chess: Any) -> str:
-    names = {
-        chess.PAWN: "pawn",
-        chess.KNIGHT: "knight",
-        chess.BISHOP: "bishop",
-        chess.ROOK: "rook",
-        chess.QUEEN: "queen",
-        chess.KING: "king",
-    }
-    return names.get(piece.piece_type, "piece")
-
-
-def describe_fork_after_move(board_after: Any, move: Any, mover_color: Any, chess: Any) -> str | None:
-    attacker_sq = move.to_square
-    attacker_piece = board_after.piece_at(attacker_sq)
-    if attacker_piece is None or attacker_piece.color != mover_color:
-        return None
-
-    attacked_targets: list[tuple[str, str]] = []
-    for sq in board_after.attacks(attacker_sq):
-        target = board_after.piece_at(sq)
-        if target is None or target.color == mover_color:
-            continue
-        if target.piece_type in {chess.KNIGHT, chess.BISHOP, chess.ROOK, chess.QUEEN, chess.KING}:
-            attacked_targets.append((chess.square_name(sq), piece_name(target, chess)))
-
-    if len(attacked_targets) >= 2:
-        first = attacked_targets[0]
-        second = attacked_targets[1]
-        return f"This creates a fork on {first[0]} ({first[1]}) and {second[0]} ({second[1]})."
-    return None
-
-
 def classify_expected_points_loss(loss: float) -> str:
     if loss <= 0.0:
         return "Best"
@@ -350,34 +317,28 @@ def classify_expected_points_loss(loss: float) -> str:
 def explain_classification(
     classification: str,
     san: str,
+    best_san: str,
     ep_loss: float,
     delta_cp: int,
-    board_after: Any,
-    move: Any,
-    mover_color: Any,
-    chess: Any,
 ) -> str:
     if classification == "Brilliant":
         return "Brilliant move: strong engine approval plus a practical sacrifice that keeps your position stable."
     if classification == "Great":
         return "Great move: significantly improved your evaluation in a critical moment."
     if classification == "Best":
-        fork_desc = describe_fork_after_move(board_after, move, mover_color, chess)
-        if fork_desc:
-            return f"Best move. {fork_desc}"
         return "Best move: matches the top engine continuation."
     if classification == "Excellent":
-        return "Excellent move: very close to engine best with negligible expected-points loss."
+        return f"Excellent move: close to best. Engine's top move was {best_san}."
     if classification == "Good":
-        return "Good move: solid practical choice with only small expected-points loss."
+        return f"Good move: solid practical choice. Best move was {best_san}."
     if classification == "Inaccuracy":
-        return f"Inaccuracy: playable, but you gave up about {ep_loss:.3f} expected points."
+        return f"Inaccuracy: playable, but not optimal. Best move was {best_san}."
     if classification == "Mistake":
-        return f"Mistake: this dropped roughly {ep_loss:.3f} expected points."
+        return f"Mistake: this gave away too much value. Best move was {best_san}."
     if classification == "Blunder":
-        return f"Blunder: major evaluation swing ({delta_cp:+} cp), costing about {ep_loss:.3f} expected points."
+        return f"Blunder: major evaluation swing ({delta_cp:+} cp). Best move was {best_san}."
     if classification == "Miss":
-        return "Miss: there was a stronger continuation to convert your advantage."
+        return f"Miss: there was a stronger continuation to convert your advantage. Best move was {best_san}."
     return f"{classification}: engine-based classification for move {san}."
 
 
@@ -428,6 +389,7 @@ def analyze_game_with_engine(
                     else:
                         best_info = multi
                     best_move = best_info["pv"][0]
+                    best_san = board.san(best_move)
                     san = board.san(move)
                     material_before = material_points(board, pov_color, chess)
                     board.push(move)
@@ -461,20 +423,23 @@ def analyze_game_with_engine(
                     elif classification in {"Inaccuracy", "Mistake", "Blunder"} and expected_best >= 0.75:
                         classification = "Miss"
 
+                    move_number = (ply + 1) // 2
+                    move_number_display = f"{move_number}." if ply % 2 == 1 else f"{move_number}..."
+
                     reviewed_moves.append(
                         {
                             "ply": ply,
+                            "move_number": move_number,
+                            "move_number_display": move_number_display,
                             "san": san,
+                            "best_move_san": best_san,
                             "classification": classification,
                             "classification_reason": explain_classification(
                                 classification,
                                 san,
+                                best_san,
                                 ep_loss,
                                 delta,
-                                board,
-                                move,
-                                pov_color,
-                                chess,
                             ),
                             "eval_before_cp": eval_before,
                             "eval_after_cp": eval_after,
@@ -751,13 +716,12 @@ def render_review(username: str, days: int, analysis: dict[str, Any], mode_note:
         engine_meta += f"<p style='color:#ffcd73'>{html.escape(str(engine_warning))}</p>"
     reviewed_rows = "".join(
         "<tr>"
-        f"<td>{m.get('ply')}</td><td>{html.escape(str(m.get('san')))}</td>"
+        f"<td>{html.escape(str(m.get('move_number_display', m.get('ply'))))}</td><td>{html.escape(str(m.get('san')))}</td>"
         f"<td>{html.escape(str(m.get('classification')))}</td>"
-        f"<td>{m.get('expected_points_loss')}</td>"
         f"<td>{html.escape(str(m.get('classification_reason', '')))}</td>"
         "</tr>"
         for m in analysis.get("reviewed_moves", [])[:20]
-    ) or "<tr><td colspan='5'>No engine move classifications available.</td></tr>"
+    ) or "<tr><td colspan='4'>No engine move classifications available.</td></tr>"
     body = (
         "<div class='panel'>"
         f"<h2>{html.escape(str(analysis.get('opening', 'Unknown Opening')))}</h2>"
@@ -774,7 +738,7 @@ def render_review(username: str, days: int, analysis: dict[str, Any], mode_note:
         "<p><strong>Bad moves</strong></p><ul>" + bad_items + "</ul>"
         "<p><strong>Move classifications (Chess.com-style)</strong></p>"
         "<table style='width:100%;border-collapse:collapse'>"
-        "<tr><th align='left'>Ply</th><th align='left'>Move</th><th align='left'>Class</th><th align='left'>EP Loss</th><th align='left'>Why</th></tr>"
+        "<tr><th align='left'>Move #</th><th align='left'>Move</th><th align='left'>Class</th><th align='left'>Why</th></tr>"
         + reviewed_rows
         + "</table>"
         f"<p><a target='_blank' href='{html.escape(str(analysis.get('url', '#')))}'>Open full game on Chess.com</a></p>"
