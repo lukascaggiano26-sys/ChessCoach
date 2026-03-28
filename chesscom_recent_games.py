@@ -300,6 +300,39 @@ def material_points(board: Any, color: Any, chess: Any) -> int:
     return total
 
 
+def piece_name(piece: Any, chess: Any) -> str:
+    names = {
+        chess.PAWN: "pawn",
+        chess.KNIGHT: "knight",
+        chess.BISHOP: "bishop",
+        chess.ROOK: "rook",
+        chess.QUEEN: "queen",
+        chess.KING: "king",
+    }
+    return names.get(piece.piece_type, "piece")
+
+
+def describe_fork_after_move(board_after: Any, move: Any, mover_color: Any, chess: Any) -> str | None:
+    attacker_sq = move.to_square
+    attacker_piece = board_after.piece_at(attacker_sq)
+    if attacker_piece is None or attacker_piece.color != mover_color:
+        return None
+
+    attacked_targets: list[tuple[str, str]] = []
+    for sq in board_after.attacks(attacker_sq):
+        target = board_after.piece_at(sq)
+        if target is None or target.color == mover_color:
+            continue
+        if target.piece_type in {chess.KNIGHT, chess.BISHOP, chess.ROOK, chess.QUEEN, chess.KING}:
+            attacked_targets.append((chess.square_name(sq), piece_name(target, chess)))
+
+    if len(attacked_targets) >= 2:
+        first = attacked_targets[0]
+        second = attacked_targets[1]
+        return f"This creates a fork on {first[0]} ({first[1]}) and {second[0]} ({second[1]})."
+    return None
+
+
 def classify_expected_points_loss(loss: float) -> str:
     if loss <= 0.0:
         return "Best"
@@ -312,6 +345,40 @@ def classify_expected_points_loss(loss: float) -> str:
     if loss < 0.20:
         return "Mistake"
     return "Blunder"
+
+
+def explain_classification(
+    classification: str,
+    san: str,
+    ep_loss: float,
+    delta_cp: int,
+    board_after: Any,
+    move: Any,
+    mover_color: Any,
+    chess: Any,
+) -> str:
+    if classification == "Brilliant":
+        return "Brilliant move: strong engine approval plus a practical sacrifice that keeps your position stable."
+    if classification == "Great":
+        return "Great move: significantly improved your evaluation in a critical moment."
+    if classification == "Best":
+        fork_desc = describe_fork_after_move(board_after, move, mover_color, chess)
+        if fork_desc:
+            return f"Best move. {fork_desc}"
+        return "Best move: matches the top engine continuation."
+    if classification == "Excellent":
+        return "Excellent move: very close to engine best with negligible expected-points loss."
+    if classification == "Good":
+        return "Good move: solid practical choice with only small expected-points loss."
+    if classification == "Inaccuracy":
+        return f"Inaccuracy: playable, but you gave up about {ep_loss:.3f} expected points."
+    if classification == "Mistake":
+        return f"Mistake: this dropped roughly {ep_loss:.3f} expected points."
+    if classification == "Blunder":
+        return f"Blunder: major evaluation swing ({delta_cp:+} cp), costing about {ep_loss:.3f} expected points."
+    if classification == "Miss":
+        return "Miss: there was a stronger continuation to convert your advantage."
+    return f"{classification}: engine-based classification for move {san}."
 
 
 def analyze_game_with_engine(
@@ -399,6 +466,16 @@ def analyze_game_with_engine(
                             "ply": ply,
                             "san": san,
                             "classification": classification,
+                            "classification_reason": explain_classification(
+                                classification,
+                                san,
+                                ep_loss,
+                                delta,
+                                board,
+                                move,
+                                pov_color,
+                                chess,
+                            ),
                             "eval_before_cp": eval_before,
                             "eval_after_cp": eval_after,
                             "best_eval_after_cp": best_eval_after,
@@ -651,37 +728,6 @@ def render_games_list(username: str, days: int, recent: dict[str, Any], error: s
     return _shell_layout("Game List", body)
 
 
-def coach_advice(analysis: dict[str, Any]) -> list[str]:
-    """Energetic, practical coaching voice inspired by creator-style breakdowns."""
-    tips: list[str] = []
-    stage = analysis.get("stage_performance", {})
-    op = stage.get("opening", {}).get("score", 0)
-    mg = stage.get("midgame", {}).get("score", 0)
-    eg = stage.get("endgame", {}).get("score", 0)
-    bad = analysis.get("bad_moves", [])
-    good = analysis.get("good_moves", [])
-
-    tips.append("Love the ambition—now let’s turn this into clean, repeatable chess.")
-    if op < 55:
-        tips.append("Opening needs structure: prioritize development + king safety before side adventures.")
-    if mg < 55:
-        tips.append("Midgame focus: pause and ask, 'What changed after my opponent’s move?'")
-    if eg < 55:
-        tips.append("Endgame discipline: activate king early and convert with simple plans, not flashy moves.")
-    if bad:
-        first_bad = bad[0]
-        tips.append(
-            f"Critical moment: ply {first_bad.get('ply')} ({first_bad.get('san')}) dropped your eval—slow down there."
-        )
-    if good:
-        first_good = good[0]
-        tips.append(
-            f"Keep this energy: ply {first_good.get('ply')} ({first_good.get('san')}) was a strong practical decision."
-        )
-    tips.append("Training task: review this game once without engine, then once with engine and compare your candidate moves.")
-    return tips
-
-
 def render_review(username: str, days: int, analysis: dict[str, Any], mode_note: str | None = None) -> str:
     stage = analysis.get("stage_performance", {})
     opening_stage = stage.get("opening", {"score": "n/a", "grade": "n/a"})
@@ -695,7 +741,6 @@ def render_review(username: str, days: int, analysis: dict[str, Any], mode_note:
         f"<li>Ply {m['ply']}: {html.escape(m['san'])} ({html.escape(m['reason'])})</li>"
         for m in analysis.get("bad_moves", [])[:10]
     ) or "<li>No major drops flagged.</li>"
-    tips = "".join(f"<li>{html.escape(t)}</li>" for t in coach_advice(analysis))
     warning = f"<p style='color:#ffcd73'>{html.escape(mode_note)}</p>" if mode_note else ""
     engine_warning = analysis.get("engine_warning")
     engine_meta = (
@@ -709,9 +754,10 @@ def render_review(username: str, days: int, analysis: dict[str, Any], mode_note:
         f"<td>{m.get('ply')}</td><td>{html.escape(str(m.get('san')))}</td>"
         f"<td>{html.escape(str(m.get('classification')))}</td>"
         f"<td>{m.get('expected_points_loss')}</td>"
+        f"<td>{html.escape(str(m.get('classification_reason', '')))}</td>"
         "</tr>"
         for m in analysis.get("reviewed_moves", [])[:20]
-    ) or "<tr><td colspan='4'>No engine move classifications available.</td></tr>"
+    ) or "<tr><td colspan='5'>No engine move classifications available.</td></tr>"
     body = (
         "<div class='panel'>"
         f"<h2>{html.escape(str(analysis.get('opening', 'Unknown Opening')))}</h2>"
@@ -728,10 +774,9 @@ def render_review(username: str, days: int, analysis: dict[str, Any], mode_note:
         "<p><strong>Bad moves</strong></p><ul>" + bad_items + "</ul>"
         "<p><strong>Move classifications (Chess.com-style)</strong></p>"
         "<table style='width:100%;border-collapse:collapse'>"
-        "<tr><th align='left'>Ply</th><th align='left'>Move</th><th align='left'>Class</th><th align='left'>EP Loss</th></tr>"
+        "<tr><th align='left'>Ply</th><th align='left'>Move</th><th align='left'>Class</th><th align='left'>EP Loss</th><th align='left'>Why</th></tr>"
         + reviewed_rows
         + "</table>"
-        "<p><strong>Coach notes (Akeem-style energy)</strong></p><ul>" + tips + "</ul>"
         f"<p><a target='_blank' href='{html.escape(str(analysis.get('url', '#')))}'>Open full game on Chess.com</a></p>"
         "</div>"
         f"<div><a href='/games?username={html.escape(username)}&days={days}'>← Back to game list</a></div>"

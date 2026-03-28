@@ -8,6 +8,7 @@ A Python tool that downloads a player's recent Chess.com games, runs engine-back
 - Detects opening name from Chess.com metadata
 - Highlights engine-evaluated "good" and "bad" moves for the selected player
 - Adds Chess.com-style move classes in review output (`Best`, `Excellent`, `Good`, `Inaccuracy`, `Mistake`, `Blunder`, plus `Great`/`Brilliant`/`Miss` heuristics)
+- Explains why each reviewed move received its label (e.g., best-line match, expected-points loss, tactical motifs like forks)
 - Rates performance by game stage:
   - opening
   - midgame
