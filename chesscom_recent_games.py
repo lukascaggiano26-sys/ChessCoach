@@ -682,15 +682,35 @@ def run_ui(host: str, port: int, engine_path: str, engine_depth: int) -> None:
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802
             parsed = urlparse(self.path)
-            if parsed.path not in {"/", "/games", "/review"}:
-                self.send_response(404)
+            if parsed.path == "/" or parsed.path == "/index.html":
+                payload = Path("ui/index.html").read_bytes()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(payload)))
                 self.end_headers()
-                self.wfile.write(b"Not Found")
+                self.wfile.write(payload)
                 return
-
-            if parsed.path == "/":
-                payload = render_home().encode("utf-8")
-            elif parsed.path == "/games":
+            if parsed.path.startswith("/ui/"):
+                rel = parsed.path[len("/ui/") :]
+                f = Path("ui") / rel
+                if not f.exists():
+                    self.send_response(404)
+                    self.end_headers()
+                    self.wfile.write(b"Not Found")
+                    return
+                payload = f.read_bytes()
+                ctype = "text/plain; charset=utf-8"
+                if f.suffix == ".css":
+                    ctype = "text/css; charset=utf-8"
+                if f.suffix == ".js":
+                    ctype = "application/javascript; charset=utf-8"
+                self.send_response(200)
+                self.send_header("Content-Type", ctype)
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+                return
+            if parsed.path == "/api/games":
                 params = parse_qs(parsed.query)
                 username = params.get("username", [""])[0].strip()
                 days_raw = params.get("days", ["3"])[0]
@@ -701,55 +721,72 @@ def run_ui(host: str, port: int, engine_path: str, engine_depth: int) -> None:
                 except ValueError:
                     days = 3
 
-                if username:
+                data: dict[str, Any]
+                if not username:
+                    data = {"error": "username required", "games": []}
+                else:
                     try:
                         recent = fetch_recent_games(username, days)
-                        payload = render_games_list(username, days, recent).encode("utf-8")
+                        games = []
+                        for g in recent.get("games", []):
+                            games.append(
+                                {
+                                    "url": g.get("url"),
+                                    "white": g.get("white", {}).get("username", "White"),
+                                    "black": g.get("black", {}).get("username", "Black"),
+                                    "time_class": g.get("time_class"),
+                                    "end": datetime.fromtimestamp(int(g.get("end_time", 0) or 0), tz=timezone.utc).isoformat(),
+                                }
+                            )
+                        data = {"username": username, "days": days, "games": games}
                     except RuntimeError as exc:
-                        payload = render_games_list(username, days, {}, error=str(exc)).encode("utf-8")
-                else:
-                    payload = render_home("Please provide a username.").encode("utf-8")
-            else:  # /review
+                        data = {"error": str(exc), "games": []}
+                payload = json.dumps(data).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+                return
+            if parsed.path == "/api/review":
                 params = parse_qs(parsed.query)
                 username = params.get("username", [""])[0].strip()
                 game_url = params.get("game_url", [""])[0].strip()
-                selected_label = params.get("label", [""])[0].strip()
-                selected_motif = params.get("motif", [""])[0].strip()
                 days_raw = params.get("days", ["3"])[0]
                 try:
                     days = int(days_raw)
                 except ValueError:
                     days = 3
                 if not username or not game_url:
-                    payload = render_home("Missing username or game URL.").encode("utf-8")
+                    data = {"error": "Missing username or game URL."}
                 else:
                     try:
                         recent = fetch_recent_games(username, days)
                         target = next((g for g in recent["games"] if str(g.get("url", "")) == game_url), None)
                         if target is None:
                             raise RuntimeError("Game not found in current date window.")
-                        mode_note = None
                         try:
                             analysis = analyze_game_with_engine(target, username, engine_path, engine_depth)
                         except RuntimeError as exc:
                             analysis = analyze_game_heuristic(target, username)
-                            mode_note = f"{exc} | Using heuristic fallback."
-                        payload = render_review(
-                            username,
-                            days,
-                            analysis,
-                            mode_note=mode_note,
-                            selected_label=selected_label,
-                            selected_motif=selected_motif,
-                        ).encode("utf-8")
+                            analysis["mode_note"] = f"{exc} | Using heuristic fallback."
+                        data = analysis
                     except RuntimeError as exc:
-                        payload = render_home(str(exc)).encode("utf-8")
+                        data = {"error": str(exc)}
+                payload = json.dumps(data).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+                return
 
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_header("Content-Length", str(len(payload)))
+            not_found = b"Not Found"
+            self.send_response(404)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(not_found)))
             self.end_headers()
-            self.wfile.write(payload)
+            self.wfile.write(not_found)
 
         def log_message(self, fmt: str, *args: Any) -> None:
             return

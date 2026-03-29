@@ -1,0 +1,16 @@
+:root{--bg:#151617;--panel:#1f2226;--line:#2b3036;--text:#e9edf1;--muted:#a4adb7;--accent:#5dbb63}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:Inter,Arial,sans-serif}
+.topbar{padding:10px 16px;background:#111317;border-bottom:1px solid var(--line)}.topbar h1{margin:0;font-size:18px}
+.layout{display:grid;grid-template-columns:280px 1fr 320px;gap:12px;padding:12px}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px;min-height:200px}
+.controls label{display:block;font-size:13px;margin:8px 0}.controls input{width:100%;margin-top:4px;background:#14171b;border:1px solid #343b44;color:var(--text);padding:8px;border-radius:6px}
+button{background:var(--accent);border:0;border-radius:8px;padding:8px 10px;font-weight:700;cursor:pointer}
+.games{margin-top:10px;max-height:60vh;overflow:auto}.gameItem{padding:8px;border-bottom:1px solid var(--line);cursor:pointer}.gameItem:hover{background:#242930}
+.boardTop{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.boardWrap{position:relative;max-width:620px;aspect-ratio:1/1;margin-top:10px}
+.board{display:grid;grid-template-columns:repeat(8,1fr);height:100%}.sq{display:flex;align-items:center;justify-content:center;font-size:42px;transition:background .2s}.light{background:#ebecd0}.dark{background:#779556}
+.sq.highlight{outline:3px solid #f0b429}.sq.best{outline:3px solid #4ca3ff}
+.arrowLayer{position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none}
+.moveList{max-height:200px;overflow:auto;margin-top:10px;border-top:1px solid var(--line);padding-top:8px}.mv{display:inline-block;padding:4px 6px;margin:2px;border-radius:6px;cursor:pointer}.mv.active{background:#3a4450}
+.labelBadge{font-size:28px;font-weight:800;padding:12px;border-radius:10px;text-align:center;transition:transform .2s ease, box-shadow .2s ease}.labelBadge.pop{transform:scale(1.03);box-shadow:0 0 0 2px rgba(255,255,255,.25)}
+.shortExpl{margin:10px 0;font-size:15px}.muted{color:var(--muted);font-size:13px}
+@media (max-width:1200px){.layout{grid-template-columns:1fr}.boardWrap{max-width:100%}}

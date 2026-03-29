@@ -322,6 +322,8 @@ def analyze_game_with_engine_pipeline(
                         "multipv": first_pass_multipv,
                         "multipv_disagreement_cp": multipv_disagreement,
                     },
+                    fen_before=board.fen(),
+                    fen_after=board_after_played.fen(),
                 )
                 reviewed_moves.append(review)
 

@@ -51,6 +51,8 @@ class MoveReview:
     best_eval_after_cp: int
     label_evidence: dict[str, Any] = field(default_factory=dict)
     engine_metadata: dict[str, Any] = field(default_factory=dict)
+    fen_before: str = ""
+    fen_after: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

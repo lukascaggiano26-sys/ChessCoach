@@ -70,8 +70,12 @@ python3 chesscom_recent_games.py <chesscom_username> --output recent_games_analy
 python3 chesscom_recent_games.py --ui
 ```
 
-Then open `http://127.0.0.1:8000`, enter a username, and click **Show games**.
-From there, click a specific game to run analysis on-demand (engine work starts only for the clicked game).
+Then open `http://127.0.0.1:8000` for the local analysis app.
+
+- Frontend: lightweight local web app (`/ui/index.html`, `/ui/app.js`, `/ui/styles.css`)
+- Backend API:
+  - `GET /api/games?username=<name>&days=<n>`
+  - `GET /api/review?username=<name>&days=<n>&game_url=<url>`
 
 ## Output JSON
 
