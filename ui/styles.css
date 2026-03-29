@@ -8,6 +8,8 @@ button{background:var(--accent);border:0;border-radius:8px;padding:8px 10px;font
 .games{margin-top:10px;max-height:60vh;overflow:auto}.gameItem{padding:8px;border-bottom:1px solid var(--line);cursor:pointer}.gameItem:hover{background:#242930}
 .boardTop{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.boardWrap{position:relative;max-width:620px;aspect-ratio:1/1;margin-top:10px}
 .board{display:grid;grid-template-columns:repeat(8,1fr);height:100%}.sq{display:flex;align-items:center;justify-content:center;font-size:42px;transition:background .2s}.light{background:#ebecd0}.dark{background:#779556}
+.boardEmpty{display:flex;align-items:center;justify-content:center;height:100%;padding:12px;text-align:center;background:#14171b;border:1px dashed #3a4450;color:var(--muted);font-weight:600}
+.boardEmpty.boardError{color:#ffb4b4;border-color:#8b2b2b;background:#241616}
 .sq.highlight{outline:3px solid #f0b429}.sq.best{outline:3px solid #4ca3ff}
 .arrowLayer{position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none}
 .moveList{max-height:200px;overflow:auto;margin-top:10px;border-top:1px solid var(--line);padding-top:8px}.mv{display:inline-block;padding:4px 6px;margin:2px;border-radius:6px;cursor:pointer}.mv.active{background:#3a4450}

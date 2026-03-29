@@ -379,6 +379,7 @@ def analyze_game_heuristic(game: dict[str, Any], username: str) -> dict[str, Any
     player_is_white = player_color == "white"
 
     highlights: list[MoveReview] = []
+    reviewed_moves: list[dict[str, Any]] = []
     stage_nets: dict[str, list[int]] = {"opening": [], "midgame": [], "endgame": []}
 
     for idx, san in enumerate(tokens):
@@ -391,6 +392,52 @@ def analyze_game_heuristic(game: dict[str, Any], username: str) -> dict[str, Any
         stage_nets[get_stage_for_ply(ply)].append(net)
         if tag is not None:
             highlights.append(MoveReview(ply=ply, san=san, tag=tag, reason=reason, eval_delta_cp=None))
+
+    # Build board/fen move list for UI if python-chess is available.
+    if importlib.util.find_spec("chess") is not None:
+        chess = importlib.import_module("chess")
+        chess_pgn = importlib.import_module("chess.pgn")
+        parsed = chess_pgn.read_game(io.StringIO(str(game.get("pgn", ""))))
+        if parsed is not None:
+            board = parsed.board()
+            node = parsed
+            ply = 0
+            while node.variations:
+                nxt = node.variations[0]
+                move = nxt.move
+                ply += 1
+                fen_before = board.fen()
+                san = board.san(move)
+                side = "white" if board.turn == chess.WHITE else "black"
+                label = "Book" if ply <= 10 else "Good"
+                h = next((x for x in highlights if x.ply == ply), None)
+                if h and h.tag == "bad":
+                    label = "Mistake"
+                elif h and h.tag == "good":
+                    label = "Excellent"
+                board.push(move)
+                reviewed_moves.append(
+                    {
+                        "ply": ply,
+                        "move_number": (ply + 1) // 2,
+                        "move_number_display": f"{(ply + 1) // 2}." if ply % 2 == 1 else f"{(ply + 1) // 2}...",
+                        "side": side,
+                        "san": san,
+                        "uci": move.uci(),
+                        "label": label,
+                        "classification": label,
+                        "short_explanation": h.reason if h else "Heuristic review (engine unavailable).",
+                        "detailed_explanation": h.reason if h else "Engine unavailable, so this move is labeled with heuristic rules.",
+                        "classification_reason": h.reason if h else "Heuristic fallback explanation.",
+                        "best_move_san": "",
+                        "best_move_uci": "",
+                        "expected_points_loss": 0.0,
+                        "tactical_tags": [],
+                        "fen_before": fen_before,
+                        "fen_after": board.fen(),
+                    }
+                )
+                node = nxt
 
     def stage_score(values: list[int]) -> dict[str, Any]:
         raw = (sum(values) / len(values)) if values else 0.0
@@ -416,7 +463,7 @@ def analyze_game_heuristic(game: dict[str, Any], username: str) -> dict[str, Any
         "engine_warning": "Engine unavailable. Install python-chess and Stockfish 18+.",
         "engine_depth": None,
         "average_eval_delta_cp": None,
-        "reviewed_moves": [],
+        "reviewed_moves": reviewed_moves,
         "good_moves": [h.__dict__ for h in highlights if h.tag == "good"],
         "bad_moves": [h.__dict__ for h in highlights if h.tag == "bad"],
     }
