@@ -9,12 +9,44 @@ A Python tool that downloads a player's recent Chess.com games, runs engine-back
 - Highlights engine-evaluated "good" and "bad" moves for the selected player
 - Adds Chess.com-style move classes in review output (`Best`, `Excellent`, `Good`, `Inaccuracy`, `Mistake`, `Blunder`, plus `Great`/`Brilliant`/`Miss` heuristics)
 - Explains why each reviewed move received its label (including the engine’s best move when your move was not best)
+- Per-game summary panels: label counts, key moments, best missed opportunities, tactical themes
+- Review-table filters by label and motif for casual browsing
 - Rates performance by game stage:
   - opening
   - midgame
   - endgame
 - Includes a simple browser UI for username input and report viewing
 - Shows games newest-to-oldest in the UI
+
+## Modular pipeline layout
+
+- `engine_pipeline.py`: engine orchestration, MultiPV position analysis, game review assembly
+- `expected_points.py`: expected-points curve from engine eval
+- `classify.py`: move label classification and special-label upgrades
+- `motifs.py`: tactical tag extraction
+- `explanations.py`: short/detailed label explanations
+- `models.py`: dataclasses for `EngineLine`, `PositionAnalysis`, `MoveReview`, `GameReview`
+
+### Expected-points model notes
+
+- Faithful to public Chess.com description: move quality is based on expected points from engine evaluation.
+- Implementation inference: expectation is computed via python-chess score semantics (`score.wdl`) with mate-aware ordering.
+- `rating_bucket` is included as a forward-compatible calibration hook and is currently not yet applied to expectation math.
+
+### Review strength configuration
+
+- First pass: depth 16-18 with MultiPV 4-5 across moves.
+- Deep verification pass: depth 24-30 for critical moves (mate scores, large eval swings, high MultiPV disagreement).
+- Engine results are cached by `FEN + depth + multipv`.
+- JSON/UI surfaces engine metadata including depth, nodes, nps, and multipv counts.
+
+### Explanation system
+
+- `explanations.py` uses deterministic templates (no LLM calls).
+- Every reviewed move receives:
+  - one-sentence `short_explanation`
+  - 2-5 sentence `detailed_explanation`
+- Explanations contrast played vs best move, mention motif/issue type when detectable, and include game-state transitions when relevant.
 
 ## CLI usage
 

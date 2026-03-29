@@ -28,6 +28,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, quote_plus, urlparse
 from urllib.request import Request, urlopen
 
+from engine_pipeline import analyze_game_with_engine_pipeline
+
 CHESSCOM_BASE = "https://api.chess.com/pub/player"
 DEFAULT_TIMEOUT_SECONDS = 30
 
@@ -348,177 +350,23 @@ def analyze_game_with_engine(
     engine_path: str,
     engine_depth: int,
 ) -> dict[str, Any]:
-    player_color = get_player_color(game, username)
-    if player_color is None:
-        raise RuntimeError("Username not present in game payload")
-
-    chess, chess_pgn, chess_engine = _load_python_chess()
-    pgn_text = str(game.get("pgn", ""))
-    parsed_game = chess_pgn.read_game(io.StringIO(pgn_text))
-    if parsed_game is None:
-        raise RuntimeError("Could not parse PGN for engine analysis")
-
-    board = parsed_game.board()
-    player_is_white = player_color == "white"
-    pov_color = chess.WHITE if player_is_white else chess.BLACK
-    player_rating = int(game.get(player_color, {}).get("rating", 1200) or 1200)
-    highlights: list[MoveReview] = []
-    stage_nets: dict[str, list[int]] = {"opening": [], "midgame": [], "endgame": []}
-    eval_deltas: list[int] = []
-    reviewed_moves: list[dict[str, Any]] = []
-
     try:
-        with chess_engine.SimpleEngine.popen_uci(engine_path) as engine:
-            engine_name = engine.id.get("name", "unknown")
-            node = parsed_game
-            ply = 0
-            while node.variations:
-                next_node = node.variations[0]
-                move = next_node.move
-                ply += 1
-
-                if board.turn == pov_color:
-                    eval_before = evaluate_cp(engine, board, pov_color, engine_depth, chess_engine)
-                    multi = engine.analyse(
-                        board,
-                        chess_engine.Limit(depth=max(8, engine_depth - 2)),
-                        multipv=2,
-                    )
-                    if isinstance(multi, list):
-                        best_info = multi[0]
-                    else:
-                        best_info = multi
-                    best_move = best_info["pv"][0]
-                    best_san = board.san(best_move)
-                    san = board.san(move)
-                    material_before = material_points(board, pov_color, chess)
-                    board.push(move)
-                    eval_after = evaluate_cp(engine, board, pov_color, engine_depth, chess_engine)
-                    material_after = material_points(board, pov_color, chess)
-                    delta = eval_after - eval_before
-                    eval_deltas.append(delta)
-
-                    stage_nets[get_stage_for_ply(ply)].append(delta)
-
-                    best_board = parsed_game.board()
-                    replay_node = parsed_game
-                    replay_ply = 0
-                    while replay_ply < ply - 1 and replay_node.variations:
-                        replay_node = replay_node.variations[0]
-                        best_board.push(replay_node.move)
-                        replay_ply += 1
-                    best_board.push(best_move)
-                    best_eval_after = evaluate_cp(engine, best_board, pov_color, max(8, engine_depth - 2), chess_engine)
-
-                    expected_after = expected_points_from_cp(eval_after, player_rating)
-                    expected_best = expected_points_from_cp(best_eval_after, player_rating)
-                    ep_loss = max(0.0, expected_best - expected_after)
-                    classification = classify_expected_points_loss(ep_loss)
-
-                    is_sacrifice = (material_before - material_after) >= 3 and eval_after >= eval_before - 80
-                    if classification in {"Best", "Excellent"} and is_sacrifice and eval_before < 300:
-                        classification = "Brilliant"
-                    elif classification in {"Best", "Excellent"} and eval_after - eval_before >= 150:
-                        classification = "Great"
-                    elif classification in {"Inaccuracy", "Mistake", "Blunder"} and expected_best >= 0.75:
-                        classification = "Miss"
-
-                    move_number = (ply + 1) // 2
-                    move_number_display = f"{move_number}." if ply % 2 == 1 else f"{move_number}..."
-
-                    reviewed_moves.append(
-                        {
-                            "ply": ply,
-                            "move_number": move_number,
-                            "move_number_display": move_number_display,
-                            "san": san,
-                            "best_move_san": best_san,
-                            "classification": classification,
-                            "classification_reason": explain_classification(
-                                classification,
-                                san,
-                                best_san,
-                                ep_loss,
-                                delta,
-                            ),
-                            "eval_before_cp": eval_before,
-                            "eval_after_cp": eval_after,
-                            "best_eval_after_cp": best_eval_after,
-                            "expected_points_loss": round(ep_loss, 3),
-                        }
-                    )
-
-                    if delta >= 80:
-                        highlights.append(
-                            MoveReview(
-                                ply=ply,
-                                san=san,
-                                tag="good",
-                                reason="engine evaluation improved significantly",
-                                eval_delta_cp=delta,
-                            )
-                        )
-                    elif delta <= -80:
-                        highlights.append(
-                            MoveReview(
-                                ply=ply,
-                                san=san,
-                                tag="bad",
-                                reason="engine evaluation dropped significantly",
-                                eval_delta_cp=delta,
-                            )
-                        )
-                    elif classification in {"Mistake", "Blunder", "Miss"}:
-                        highlights.append(
-                            MoveReview(
-                                ply=ply,
-                                san=san,
-                                tag="bad",
-                                reason=f"{classification} by expected-points model",
-                                eval_delta_cp=delta,
-                            )
-                        )
-                else:
-                    board.push(move)
-
-                node = next_node
+        review = analyze_game_with_engine_pipeline(
+            game=game,
+            username=username,
+            engine_path=engine_path,
+            engine_depth=engine_depth,
+            multipv=2,
+        )
+        payload = review.to_dict()
+        for move in payload.get("reviewed_moves", []):
+            # Backward compatibility with earlier key name
+            move["classification"] = move.get("label")
+        return payload
     except FileNotFoundError as exc:
         raise RuntimeError(
             f"Engine binary not found at '{engine_path}'. Install Stockfish or pass --engine-path."
         ) from exc
-
-    def stage_score(values: list[int]) -> dict[str, Any]:
-        if not values:
-            raw = 0.0
-        else:
-            raw = sum(values) / len(values)
-        score = max(0.0, min(100.0, 60.0 + raw / 10.0))
-        return {"score": round(score, 1), "grade": stage_grade(score), "sample_size": len(values)}
-
-    opening_name = detect_opening(game)
-    player_result = str(game.get(player_color, {}).get("result", "unknown"))
-
-    return {
-        "url": game.get("url"),
-        "time_class": game.get("time_class"),
-        "rated": game.get("rated"),
-        "end_time": game.get("end_time"),
-        "player_color": player_color,
-        "player_result": player_result,
-        "opening": opening_name,
-        "stage_performance": {
-            "opening": stage_score(stage_nets["opening"]),
-            "midgame": stage_score(stage_nets["midgame"]),
-            "endgame": stage_score(stage_nets["endgame"]),
-        },
-        "engine_version": engine_name,
-        "engine_warning": None if "Stockfish 18" in str(engine_name) else "Use Stockfish 18+ for latest review quality.",
-        "engine_depth": engine_depth,
-        "average_eval_delta_cp": round(sum(eval_deltas) / len(eval_deltas), 1) if eval_deltas else 0.0,
-        "reviewed_moves": reviewed_moves,
-        "good_moves": [h.__dict__ for h in highlights if h.tag == "good"],
-        "bad_moves": [h.__dict__ for h in highlights if h.tag == "bad"],
-    }
 
 
 def analyze_game_heuristic(game: dict[str, Any], username: str) -> dict[str, Any]:
@@ -693,7 +541,14 @@ def render_games_list(username: str, days: int, recent: dict[str, Any], error: s
     return _shell_layout("Game List", body)
 
 
-def render_review(username: str, days: int, analysis: dict[str, Any], mode_note: str | None = None) -> str:
+def render_review(
+    username: str,
+    days: int,
+    analysis: dict[str, Any],
+    mode_note: str | None = None,
+    selected_label: str = "",
+    selected_motif: str = "",
+) -> str:
     stage = analysis.get("stage_performance", {})
     opening_stage = stage.get("opening", {"score": "n/a", "grade": "n/a"})
     midgame_stage = stage.get("midgame", {"score": "n/a", "grade": "n/a"})
@@ -712,16 +567,77 @@ def render_review(username: str, days: int, analysis: dict[str, Any], mode_note:
         f"<p class='muted'>Engine: {html.escape(str(analysis.get('engine_version', 'n/a')))} "
         f"(depth {html.escape(str(analysis.get('engine_depth', 'n/a')))}).</p>"
     )
+    meta = analysis.get("engine_metadata", {})
+    if isinstance(meta, dict):
+        engine_meta += (
+            f"<p class='muted'>MultiPV: {html.escape(str(meta.get('first_pass_multipv', 'n/a')))} | "
+            f"Avg nodes: {html.escape(str(meta.get('avg_nodes', 'n/a')))} | "
+            f"Avg nps: {html.escape(str(meta.get('avg_nps', 'n/a')))}</p>"
+        )
     if engine_warning:
         engine_meta += f"<p style='color:#ffcd73'>{html.escape(str(engine_warning))}</p>"
+    reviewed_moves = analysis.get("reviewed_moves", [])
+    if selected_label:
+        reviewed_moves = [m for m in reviewed_moves if str(m.get("classification", m.get("label", ""))) == selected_label]
+    if selected_motif:
+        reviewed_moves = [
+            m
+            for m in reviewed_moves
+            if selected_motif in list(m.get("tactical_tags", []))
+        ]
+
+    labels = sorted({str(m.get("classification", m.get("label", ""))) for m in analysis.get("reviewed_moves", []) if m})
+    motifs = sorted({t for m in analysis.get("reviewed_moves", []) for t in m.get("tactical_tags", [])})
+
     reviewed_rows = "".join(
         "<tr>"
         f"<td>{html.escape(str(m.get('move_number_display', m.get('ply'))))}</td><td>{html.escape(str(m.get('san')))}</td>"
         f"<td>{html.escape(str(m.get('classification')))}</td>"
-        f"<td>{html.escape(str(m.get('classification_reason', '')))}</td>"
+        f"<td>{html.escape(str(m.get('best_move_san', '')))}</td>"
+        f"<td>{html.escape(str(m.get('expected_points_loss', '')))}</td>"
+        f"<td>{html.escape(', '.join(m.get('tactical_tags', [])))}</td>"
+        "<td>"
+        f"{html.escape(str(m.get('short_explanation', m.get('classification_reason', ''))))}"
+        f"<details><summary>Details</summary>{html.escape(str(m.get('detailed_explanation', m.get('classification_reason', ''))))}</details>"
+        "</td>"
         "</tr>"
-        for m in analysis.get("reviewed_moves", [])[:20]
-    ) or "<tr><td colspan='4'>No engine move classifications available.</td></tr>"
+        for m in reviewed_moves[:50]
+    ) or "<tr><td colspan='7'>No moves match current filters.</td></tr>"
+
+    quality_counts = analysis.get("move_quality_counts", {})
+    counts_html = "".join(f"<li>{html.escape(k)}: {v}</li>" for k, v in quality_counts.items()) or "<li>n/a</li>"
+    key_moments = analysis.get("key_moments", [])
+    key_html = "".join(
+        f"<li>{km.get('move_number_display')} {html.escape(str(km.get('san')))} — {html.escape(str(km.get('label')))} (EP loss {km.get('expected_points_loss')})</li>"
+        for km in key_moments
+    ) or "<li>n/a</li>"
+    missed = analysis.get("best_missed_opportunities", [])
+    missed_html = "".join(
+        f"<li>{m.get('move_number_display')} {html.escape(str(m.get('san')))} | best was {html.escape(str(m.get('best_move_san')))}</li>"
+        for m in missed
+    ) or "<li>n/a</li>"
+    themes = analysis.get("tactical_themes", {})
+    themes_html = "".join(f"<li>{html.escape(t)}: {c}</li>" for t, c in themes.items()) or "<li>n/a</li>"
+
+    label_opts = "".join(
+        f"<option value='{html.escape(lbl)}' {'selected' if lbl == selected_label else ''}>{html.escape(lbl)}</option>"
+        for lbl in labels
+    )
+    motif_opts = "".join(
+        f"<option value='{html.escape(mt)}' {'selected' if mt == selected_motif else ''}>{html.escape(mt)}</option>"
+        for mt in motifs
+    )
+    filter_form = (
+        f"<form method='get' action='/review'>"
+        f"<input type='hidden' name='username' value='{html.escape(username)}'>"
+        f"<input type='hidden' name='days' value='{days}'>"
+        f"<input type='hidden' name='game_url' value='{html.escape(str(analysis.get('url', '')))}'>"
+        "<label>Filter label</label><br><select name='label'><option value=''>All</option>"
+        f"{label_opts}"
+        "</select><br><label>Filter motif</label><br><select name='motif'><option value=''>All</option>"
+        f"{motif_opts}"
+        "</select><br><br><button type='submit'>Apply filters</button></form>"
+    )
     body = (
         "<div class='panel'>"
         f"<h2>{html.escape(str(analysis.get('opening', 'Unknown Opening')))}</h2>"
@@ -729,6 +645,7 @@ def render_review(username: str, days: int, analysis: dict[str, Any], mode_note:
         f"Result: <strong>{html.escape(str(analysis.get('player_result', 'unknown')))}</strong></p>"
         f"{warning}"
         f"{engine_meta}"
+        f"{filter_form}"
         "<ul>"
         f"<li>Opening score: {opening_stage['score']} ({opening_stage['grade']})</li>"
         f"<li>Midgame score: {midgame_stage['score']} ({midgame_stage['grade']})</li>"
@@ -738,9 +655,13 @@ def render_review(username: str, days: int, analysis: dict[str, Any], mode_note:
         "<p><strong>Bad moves</strong></p><ul>" + bad_items + "</ul>"
         "<p><strong>Move classifications (Chess.com-style)</strong></p>"
         "<table style='width:100%;border-collapse:collapse'>"
-        "<tr><th align='left'>Move #</th><th align='left'>Move</th><th align='left'>Class</th><th align='left'>Why</th></tr>"
+        "<tr><th align='left'>Move #</th><th align='left'>Move</th><th align='left'>Class</th><th align='left'>Best</th><th align='left'>EP Loss</th><th align='left'>Motifs</th><th align='left'>Why</th></tr>"
         + reviewed_rows
         + "</table>"
+        "<p><strong>Move-quality counts by label</strong></p><ul>" + counts_html + "</ul>"
+        "<p><strong>Key moments</strong></p><ul>" + key_html + "</ul>"
+        "<p><strong>Best missed opportunities</strong></p><ul>" + missed_html + "</ul>"
+        "<p><strong>Tactical themes detected</strong></p><ul>" + themes_html + "</ul>"
         f"<p><a target='_blank' href='{html.escape(str(analysis.get('url', '#')))}'>Open full game on Chess.com</a></p>"
         "</div>"
         f"<div><a href='/games?username={html.escape(username)}&days={days}'>← Back to game list</a></div>"
@@ -783,6 +704,8 @@ def run_ui(host: str, port: int, engine_path: str, engine_depth: int) -> None:
                 params = parse_qs(parsed.query)
                 username = params.get("username", [""])[0].strip()
                 game_url = params.get("game_url", [""])[0].strip()
+                selected_label = params.get("label", [""])[0].strip()
+                selected_motif = params.get("motif", [""])[0].strip()
                 days_raw = params.get("days", ["3"])[0]
                 try:
                     days = int(days_raw)
@@ -802,7 +725,14 @@ def run_ui(host: str, port: int, engine_path: str, engine_depth: int) -> None:
                         except RuntimeError as exc:
                             analysis = analyze_game_heuristic(target, username)
                             mode_note = f"{exc} | Using heuristic fallback."
-                        payload = render_review(username, days, analysis, mode_note=mode_note).encode("utf-8")
+                        payload = render_review(
+                            username,
+                            days,
+                            analysis,
+                            mode_note=mode_note,
+                            selected_label=selected_label,
+                            selected_motif=selected_motif,
+                        ).encode("utf-8")
                     except RuntimeError as exc:
                         payload = render_home(str(exc)).encode("utf-8")
 
